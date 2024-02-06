@@ -25,6 +25,7 @@ class ZoteroItem:
     annotation_type: Optional[str] = None
     creators: Optional[str] = field(init=True, default=None)
     source_url: Optional[str] = None
+    attachment_url: Optional[str] = None
     page_label: Optional[str] = None
     color: Optional[str] = None
     relations: Optional[Dict] = field(init=True, default=None)
@@ -40,8 +41,19 @@ class ZoteroItem:
         # Sample {'dc:relation': ['http://zotero.org/users/123/items/ABC', 'http://zotero.org/users/123/items/DEF']}
         if self.relations:
             self.relations = self.relations.get("dc:relation")
+        
+        if self.creators:
+            et_al = "et al."
+            max_length = 1024 - len(et_al)
+            creators_str = ", ".join(self.creators)
+            if len(creators_str) > max_length:
+                # Reset creators_str and find the first n creators that fit in max_length
+                creators_str = ""
+                while self.creators and len(creators_str) < max_length:
+                    creators_str += self.creators.pop() + ", "
+                creators_str += et_al
+            self.creators = creators_str
 
-        self.creators = ", ".join(self.creators) if self.creators else None
 
     def get_nonempty_params(self) -> Dict:
         return {k: v for k, v in self.__dict__.items() if v}
@@ -101,17 +113,18 @@ def get_zotero_client(
 
 
 class ZoteroAnnotationsNotes:
-    def __init__(self, zotero_client: Zotero):
+    def __init__(self, zotero_client: Zotero, filter_colors: List[str]):
         self.zot = zotero_client
         self.failed_items: List[Dict] = []
         self._cache: Dict = {}
         self._parent_mapping: Dict = {}
+        self.filter_colors: List[str] = filter_colors
 
     def get_item_metadata(self, annot: Dict) -> Dict:
         data = annot["data"]
         # A Zotero annotation or note must have a parent with parentItem key.
         parent_item_key = data["parentItem"]
-
+        
         if parent_item_key in self._parent_mapping:
             top_item_key = self._parent_mapping[parent_item_key]
             if top_item_key in self._cache:
@@ -137,12 +150,16 @@ class ZoteroAnnotationsNotes:
             "tags": data["tags"],
             "document_type": data["itemType"],
             "source_url": top_item["links"]["alternate"]["href"],
+            "creators": "",
+            "attachment_url": "",
         }
         if "creators" in data:
             metadata["creators"] = [
                 creator["firstName"] + " " + creator["lastName"]
                 for creator in data["creators"]
             ]
+        if "attachment" in top_item["links"] and top_item["links"]["attachment"]["attachmentType"] == "application/pdf":
+            metadata["attachment_url"] = top_item["links"]["attachment"]["href"]
 
         self._cache[top_item_key] = metadata
         return metadata
@@ -162,6 +179,10 @@ class ZoteroAnnotationsNotes:
             elif annotation_type == "note":
                 text = data["annotationComment"]
                 comment = ""
+            else:
+                raise NotImplementedError(
+                    "Handwritten annotations are not currently supported."
+                )
         elif item_type == "note":
             text = data["note"]
             comment = ""
@@ -179,6 +200,7 @@ class ZoteroAnnotationsNotes:
             text=text,
             annotated_at=data["dateModified"],
             annotation_url=annot["links"]["alternate"]["href"],
+            attachment_url=metadata["attachment_url"],
             comment=comment,
             title=metadata["title"],
             tags=data["tags"],
@@ -201,7 +223,8 @@ class ZoteroAnnotationsNotes:
         )
         for annot in annots:
             try:
-                formatted_annots.append(self.format_item(annot))
+                if len(self.filter_colors) == 0 or annot["data"]["annotationColor"] in self.filter_colors:
+                    formatted_annots.append(self.format_item(annot))
             except:
                 self.failed_items.append(annot)
                 continue
@@ -225,15 +248,3 @@ class ZoteroAnnotationsNotes:
         with open(out_filepath, "w") as f:
             dump(self.failed_items, f, indent=4)
         print(f"\nZOTERO: Detail of failed items are saved into {out_filepath}\n")
-
-
-def retrieve_all_annotations(zotero_client: Zotero) -> List[Dict]:
-    print(
-        "Retrieving ALL annotations from Zotero Database. \nIt may take some time...\n"
-    )
-    return zotero_client.everything(zotero_client.items(itemType="annotation"))
-
-
-def retrieve_all_notes(zotero_client: Zotero) -> List[Dict]:
-    print("Retrieving ALL notes from Zotero Database. \nIt may take some time...\n")
-    return zotero_client.everything(zotero_client.items(itemType="note"))
